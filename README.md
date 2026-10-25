@@ -68,3 +68,7 @@ genesis block, block 100000's merkle root) and don't need a node.
 - Measure hashrate on a harder target, then move `search` to C or Rust and use every core.
   Compare the result with an ASIC's hundreds of TH/s.
 - Add BIP320 version rolling as a second source of search space alongside the extranonce.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
