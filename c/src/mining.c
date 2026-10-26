@@ -168,13 +168,15 @@ static void *search_worker(void *arg) {
         if ((nonce & 0xFFFF) == 0 && atomic_load_explicit(job->stop_flag, memory_order_relaxed)) {
             break;
         }
-        uint32_t state[8];
-        memcpy(state, job->midstate, sizeof(state));
         /* The header stores the nonce little-endian; SHA-256 reads words big-endian. */
         block1[3] = __builtin_bswap32((uint32_t)nonce);
-        sha256_compress(state, block1);
+        /* The first digest is the start of the second hash's block, so compute it in place.
+           A copy costs more than it looks: with AVX it becomes one 32-byte load of the two
+           16-byte stores SHA-NI just made, which the CPU can't forward and must wait out. */
+        memcpy(block2, job->midstate, 8 * sizeof(uint32_t));
+        sha256_compress(block2, block1);
 
-        memcpy(block2, state, sizeof(state));
+        uint32_t state[8];
         memcpy(state, SHA256_IV, sizeof(state));
         sha256_compress(state, block2);
 

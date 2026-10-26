@@ -12,7 +12,7 @@ python3 -m unittest tests.test_mining.MineBlockTest   # one class (or append .te
 
 make -C c                                             # builds c/miner (-O3 -march=native)
 make -C c test                                        # C tests: one binary, build/test, runs every check (UBSan in trap mode)
-c/miner --benchmark 5                                 # C hashrate; needs no node
+c/miner --benchmark 5                                 # C hashrate and SHA-256 implementation; needs no node
 
 scripts/regtest.sh start | stop | reset | cli ARGS... # local node; needs bitcoind and bitcoin-cli on PATH
 python3 -m miner --blocks 101                         # mine against that node (c/miner takes the same flags, plus --threads)
@@ -35,13 +35,14 @@ The user may have their own node from `scripts/regtest.sh` running on the defaul
 
 ## Architecture
 
-The modules form a strict layering: `encoding` ← `tx` ← `block` ← `mining` ← `__main__`/`main.c`. `rpc` stands apart. The C files mirror the Python modules one for one (`c/src/sha256.c` and `json.c` stand in for `hashlib` and `json`). When changing consensus logic in one implementation, make the same change in the other.
+The modules form a strict layering: `encoding` ← `tx` ← `block` ← `mining` ← `__main__`/`main.c`. `rpc` stands apart. The C files mirror the Python modules one for one (`c/src/sha256.c`, `sha256_shani.c` and `json.c` stand in for `hashlib` and `json`). When changing consensus logic in one implementation, make the same change in the other.
 
 - **Byte order convention:** every hash is held in internal byte order. Conversion to and from the byte-reversed hex used by RPC and explorers happens only at the boundary (`from_display_hex` / `to_display_hex`). Proof of work compares the digest as a little-endian integer; in C, targets are 32-byte little-endian arrays compared by `hash_meets_target`.
 - **The Python RPC object is duck-typed:** `mining.py` only needs something with `.call(method, *params)`. Tests pass a `FakeRPC` to drive `mine_block` without a node, so keep it that way rather than importing `BitcoinRPC` there. C's `mine_block` takes a concrete `rpc_client`, so it is covered only end to end; the C tests cover `build_candidate`, `search` and serialization directly.
 - **`build_candidate` cross-checks the node:** it recomputes the witness commitment and decodes `nBits`, then fails (a `ValueError` in Python, `false` plus a message in C) if either disagrees with `getblocktemplate`'s `default_witness_commitment` / `target`. Keep these checks; they catch mistakes before a block is submitted.
 - **Search loop (`mine_block`):** it searches nonces in chunks of `CHUNK_SIZE` (2^20 in Python, 2^26 in C), rebuilding the candidate each chunk (cheap next to the hashing). It refetches the template after `TEMPLATE_MAX_AGE` seconds, and after 2³² failed nonces it increments the extranonce in the coinbase scriptSig to get a new merkle root. Both `search` functions hash the first 64 header bytes once (the midstate).
-- **C hashing fast path (`search_worker`):** it pre-fills the SHA-256 padding words so each attempt is two `sha256_compress` calls, and rejects most hashes on the top 32 bits alone (`state[7]` byte-swapped). `test_search_matches_reference` checks it against plain `sha256d`, including the equal-top-bits case, so run it after any optimization. Slices are split evenly across threads; slice 0 runs on the calling thread, and a shared stop flag is checked every 65,536 nonces. With more than one thread, the returned nonce is valid but not necessarily the lowest in the range.
+- **C SHA-256 dispatch:** `sha256_compress` forwards to `sha256_compress_shani` when CPUID reports SHA-NI, otherwise to `sha256_compress_generic`. The SHA-NI functions get the instructions from `__attribute__((target("sha,sse4.1")))`, not from `-msha`, so the binary still runs on CPUs without them; keep such instructions out of every other function. `sha256_use` forces an implementation. The tests run everything on the fastest one, then rerun the hashing tests on the generic one and compare both on random input. On a CPU without SHA-NI, its tests are skipped with a note.
+- **C hashing fast path (`search_worker`):** it pre-fills the SHA-256 padding words so each attempt is two `sha256_compress` calls, the first writing its digest straight into the second's block (copying it instead cost 14% with `-march=native`, through a store-forwarding stall). It rejects most hashes on the top 32 bits alone (`state[7]` byte-swapped). `test_search_matches_reference` checks it against plain `sha256d`, including the equal-top-bits case, so run it after any optimization. Measure speed with `c/miner --benchmark` in both the default build and `make -C c CFLAGS=-O3`, since their code generation differs. Slices are split evenly across threads; slice 0 runs on the calling thread, and a shared stop flag is checked every 65,536 nonces. With more than one thread, the returned nonce is valid but not necessarily the lowest in the range.
 
 ## Consensus details that are easy to break
 

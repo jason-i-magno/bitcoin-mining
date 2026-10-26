@@ -412,6 +412,49 @@ static void test_search_matches_reference(void) {
     CHECK(!r.found && r.hashes == n);
 }
 
+/* main runs every test on the fastest implementation. Repeat the hashing tests on the
+   portable one, so a CPU with SHA-NI still checks the code other CPUs would run. */
+static void test_generic_compress(void) {
+    sha256_use(sha256_compress_generic);
+    CHECK(strcmp(sha256_implementation(), "generic") == 0);
+    test_sha256();
+    test_search_matches_reference();
+    sha256_use(NULL);
+}
+
+static uint32_t xorshift(uint64_t *x) {
+    *x ^= *x << 13;
+    *x ^= *x >> 7;
+    *x ^= *x << 17;
+    return (uint32_t)(*x >> 32);
+}
+
+/* Compare SHA-NI with the portable code on pseudo-random states and blocks. */
+static void test_shani_matches_generic(void) {
+#ifdef SHA256_HAVE_SHANI
+    if (!sha256_shani_supported()) {
+        printf("this CPU has no SHA-NI, so only the generic SHA-256 was tested\n");
+        return;
+    }
+    CHECK(strcmp(sha256_implementation(), "SHA-NI") == 0);
+    uint64_t x = UINT64_C(0x9E3779B97F4A7C15);
+    int mismatches = 0;
+    for (int i = 0; i < 10000; i++) {
+        uint32_t a[8], b[8], block[16];
+        for (int j = 0; j < 8; j++) {
+            a[j] = b[j] = xorshift(&x);
+        }
+        for (int j = 0; j < 16; j++) {
+            block[j] = xorshift(&x);
+        }
+        sha256_compress_generic(a, block);
+        sha256_compress_shani(b, block);
+        mismatches += memcmp(a, b, sizeof(a)) != 0;
+    }
+    CHECK(mismatches == 0);
+#endif
+}
+
 int main(void) {
     test_sha256();
     test_compact_size();
@@ -426,6 +469,8 @@ int main(void) {
     test_dechunk();
     test_build_candidate();
     test_search_matches_reference();
+    test_generic_compress();
+    test_shani_matches_generic();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

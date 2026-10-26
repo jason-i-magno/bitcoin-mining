@@ -10,6 +10,7 @@
 
 #include "mining.h"
 #include "rpc.h"
+#include "sha256.h"
 
 static void usage(FILE *out) {
     fprintf(out,
@@ -59,7 +60,8 @@ static void benchmark(int threads, long seconds) {
         elapsed = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
     } while (elapsed < (double)seconds);
     double rate = (double)hashes / elapsed;
-    printf("%d thread(s): %.2f MH/s (%.2f MH/s per thread)\n", threads, rate / 1e6, rate / 1e6 / threads);
+    printf("%d thread(s), %s SHA-256: %.2f MH/s (%.2f MH/s per thread)\n", threads, sha256_implementation(),
+           rate / 1e6, rate / 1e6 / threads);
 }
 
 /* Resolve the payout address to its scriptPubKey, asking the wallet for one if none was given. */
@@ -163,7 +165,8 @@ int main(int argc, char **argv) {
     if (!chain) {
         die("cannot reach bitcoind (%s). Start it with: scripts/regtest.sh start", rpc.error);
     }
-    printf("Mining %ld block(s) on %s with %ld thread(s), ", blocks, chain, threads);
+    printf("Mining %ld block(s) on %s with %ld thread(s) and %s SHA-256, ", blocks, chain, threads,
+           sha256_implementation());
     json_free(info);
 
     uint8_t script_pubkey[MAX_SCRIPT_PUBKEY];

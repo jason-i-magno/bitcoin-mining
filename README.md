@@ -77,26 +77,33 @@ Run it from the repo root so that the default `--datadir data` finds the node's 
 
 Its hashing loop goes further than the Python one. Besides the midstate, it fills in the SHA-256
 padding for both hashes ahead of time, so each attempt is exactly two calls to the compression
-function. It also rejects most hashes by comparing only their top 32 bits with the target. On one
-12-thread machine:
+function. It also rejects most hashes by comparing only their top 32 bits with the target.
+
+That compression function uses the CPU's SHA extensions (SHA-NI) on x86 processors that have them:
+Intel since Ice Lake (2019) and Atom since Goldmont, AMD since Zen. Other CPUs get portable C. The
+choice is made at run time, so a build without the default `-march=native` (`make -C c CFLAGS=-O3`)
+runs on any x86-64 CPU, uses SHA-NI where it can, and is just as fast. `c/miner --benchmark` reports
+which one it used. On a 6-core, 12-thread AMD Ryzen 5 3600X:
 
 | Miner | Hashrate |
 |---|---|
 | Python, 1 thread | 0.86 MH/s |
-| C, 1 thread | 2.5 MH/s |
-| C, 12 threads | 16.7 MH/s |
+| C, portable SHA-256, 1 thread | 2.5 MH/s |
+| C, portable SHA-256, 12 threads | 16.9 MH/s |
+| C, SHA-NI, 1 thread | 14.4 MH/s |
+| C, SHA-NI, 12 threads | 137 MH/s |
 | Industrial ASIC | ~200,000,000 MH/s |
 
-Python does better than you might expect because `hashlib` calls OpenSSL, which uses the CPU's SHA
-instructions. The C version's SHA-256 is plain portable code.
+Python's `hashlib` calls OpenSSL, which also uses SHA-NI, so most of Python's time per attempt goes
+to the interpreter rather than to hashing.
 
 ## Ideas for next steps
 
 - Write a Stratum v1 client (`mining.subscribe` / `mining.notify` / `mining.submit`) and mine a
   pool's work instead of your node's. The pool sends coinbase halves and a merkle branch instead of
   full transactions.
-- Give the C miner's `sha256_compress` a version that uses the CPU's SHA extensions (SHA-NI on x86,
-  the crypto extensions on ARMv8), which are several times faster than portable code.
+- Give the C miner an ARMv8 `sha256_compress` that uses the SHA-256 crypto extensions (`sha256h`,
+  `sha256h2`, `sha256su0`, `sha256su1`), next to the x86 SHA-NI one in `c/src/sha256_shani.c`.
 - Add BIP320 version rolling as a second source of search space alongside the extranonce.
 
 ## License

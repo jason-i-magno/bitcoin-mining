@@ -12,7 +12,7 @@ LDLIBS += -pthread
 TEST_CFLAGS := -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -g -O2 -D_FORTIFY_SOURCE=3 \
                -fsanitize=undefined -fsanitize-trap=all -Isrc
 
-LIB_SRC := src/sha256.c src/encoding.c src/json.c src/rpc.c src/tx.c src/block.c src/mining.c
+LIB_SRC := src/sha256.c src/sha256_shani.c src/encoding.c src/json.c src/rpc.c src/tx.c src/block.c src/mining.c
 LIB_OBJ := $(LIB_SRC:src/%.c=build/%.o)
 
 miner: build/main.o $(LIB_OBJ)

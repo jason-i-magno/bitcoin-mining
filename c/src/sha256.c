@@ -2,9 +2,10 @@
 
 #include "sha256.h"
 
+#include <stdatomic.h>
 #include <string.h>
 
-static const uint32_t K[64] = {
+const uint32_t SHA256_K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
     0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
@@ -21,7 +22,7 @@ const uint32_t SHA256_IV[8] = {
 
 #define ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
 
-void sha256_compress(uint32_t state[8], const uint32_t block[16]) {
+void sha256_compress_generic(uint32_t state[8], const uint32_t block[16]) {
     uint32_t w[64];
     memcpy(w, block, 16 * sizeof(uint32_t));
     for (int i = 16; i < 64; i++) {
@@ -33,7 +34,7 @@ void sha256_compress(uint32_t state[8], const uint32_t block[16]) {
     uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
     uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
     for (int i = 0; i < 64; i++) {
-        uint32_t t1 = h + (ROTR(e, 6) ^ ROTR(e, 11) ^ ROTR(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i];
+        uint32_t t1 = h + (ROTR(e, 6) ^ ROTR(e, 11) ^ ROTR(e, 25)) + ((e & f) ^ (~e & g)) + SHA256_K[i] + w[i];
         uint32_t t2 = (ROTR(a, 2) ^ ROTR(a, 13) ^ ROTR(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
         h = g;
         g = f;
@@ -52,6 +53,45 @@ void sha256_compress(uint32_t state[8], const uint32_t block[16]) {
     state[5] += f;
     state[6] += g;
     state[7] += h;
+}
+
+/* What sha256_compress forwards to, chosen on first use. Threads that race to choose
+   all store the same pointer. */
+static _Atomic(sha256_compress_fn *) selected;
+
+static sha256_compress_fn *fastest(void) {
+#ifdef SHA256_HAVE_SHANI
+    if (sha256_shani_supported()) {
+        return sha256_compress_shani;
+    }
+#endif
+    return sha256_compress_generic;
+}
+
+static sha256_compress_fn *current(void) {
+    sha256_compress_fn *fn = atomic_load_explicit(&selected, memory_order_relaxed);
+    if (!fn) {
+        fn = fastest();
+        atomic_store_explicit(&selected, fn, memory_order_relaxed);
+    }
+    return fn;
+}
+
+void sha256_compress(uint32_t state[8], const uint32_t block[16]) {
+    current()(state, block);
+}
+
+void sha256_use(sha256_compress_fn *fn) {
+    atomic_store_explicit(&selected, fn, memory_order_relaxed);
+}
+
+const char *sha256_implementation(void) {
+#ifdef SHA256_HAVE_SHANI
+    if (current() == sha256_compress_shani) {
+        return "SHA-NI";
+    }
+#endif
+    return "generic";
 }
 
 static void compress_bytes(uint32_t state[8], const uint8_t block[64]) {
