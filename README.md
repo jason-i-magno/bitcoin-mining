@@ -3,7 +3,7 @@
 A minimal Bitcoin miner in pure Python (standard library only). It mines real blocks on a private
 **regtest** chain, which Bitcoin Core validates and accepts exactly as it would on mainnet. The only
 difference is the difficulty: regtest's target is met by about half of all hashes, so a CPU finds a
-block in one or two attempts.
+block in one or two attempts. A multithreaded [C version](#c-version) lives in `c/`.
 
 ## Setup
 
@@ -60,13 +60,43 @@ genesis block, block 100000's merkle root) and don't need a node.
 - **Midstate.** SHA-256 works in 64-byte chunks, and the nonce lives in the header's second chunk.
   So the first chunk is hashed once per candidate, not once per attempt. Real miners do the same.
 
+## C version
+
+`c/` is a port of the same miner to C11. It needs nothing beyond libc and pthreads, so it includes
+its own SHA-256, JSON parser and HTTP client. Its files mirror the Python modules one for one
+(`mining.c` and `mining.py`, `tx.c` and `tx.py`, and so on), and it adds multithreaded hashing.
+
+```sh
+make -C c                    # builds c/miner, tuned for this CPU (-march=native)
+make -C c test               # unit tests, using the same mainnet vectors as the Python suite
+c/miner --blocks 101         # same flags as python3 -m miner, plus --threads
+c/miner --benchmark 5        # measure hashrate on every core; needs no node
+```
+
+Run it from the repo root so that the default `--datadir data` finds the node's cookie.
+
+Its hashing loop goes further than the Python one. Besides the midstate, it fills in the SHA-256
+padding for both hashes ahead of time, so each attempt is exactly two calls to the compression
+function. It also rejects most hashes by comparing only their top 32 bits with the target. On one
+12-thread machine:
+
+| Miner | Hashrate |
+|---|---|
+| Python, 1 thread | 0.86 MH/s |
+| C, 1 thread | 2.5 MH/s |
+| C, 12 threads | 16.7 MH/s |
+| Industrial ASIC | ~200,000,000 MH/s |
+
+Python does better than you might expect because `hashlib` calls OpenSSL, which uses the CPU's SHA
+instructions. The C version's SHA-256 is plain portable code.
+
 ## Ideas for next steps
 
 - Write a Stratum v1 client (`mining.subscribe` / `mining.notify` / `mining.submit`) and mine a
   pool's work instead of your node's. The pool sends coinbase halves and a merkle branch instead of
   full transactions.
-- Measure hashrate on a harder target, then move `search` to C or Rust and use every core.
-  Compare the result with an ASIC's hundreds of TH/s.
+- Give the C miner's `sha256_compress` a version that uses the CPU's SHA extensions (SHA-NI on x86,
+  the crypto extensions on ARMv8), which are several times faster than portable code.
 - Add BIP320 version rolling as a second source of search space alongside the extranonce.
 
 ## License
