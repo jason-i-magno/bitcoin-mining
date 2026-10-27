@@ -3,7 +3,8 @@
 A minimal Bitcoin miner in pure Python (standard library only). It mines real blocks on a private
 **regtest** chain, which Bitcoin Core validates and accepts exactly as it would on mainnet. The only
 difference is the difficulty: regtest's target is met by about half of all hashes, so a CPU finds a
-block in one or two attempts. A multithreaded [C version](#c-version) lives in `c/`.
+block in one or two attempts. A multithreaded [C version](#c-version) lives in `c/`, with optional
+[GPU mining](#gpu-version) through OpenCL.
 
 ## Setup
 
@@ -92,10 +93,37 @@ which one it used. On a 6-core, 12-thread AMD Ryzen 5 3600X:
 | C, portable SHA-256, 12 threads | 16.9 MH/s |
 | C, SHA-NI, 1 thread | 14.4 MH/s |
 | C, SHA-NI, 12 threads | 137 MH/s |
+| C, OpenCL on an AMD Radeon RX 5600 XT GPU | 1,050 MH/s |
 | Industrial ASIC | ~200,000,000 MH/s |
 
 Python's `hashlib` calls OpenSSL, which also uses SHA-NI, so most of Python's time per attempt goes
 to the interpreter rather than to hashing.
+
+## GPU version
+
+`make -C c GPU=1` adds an OpenCL nonce search, used with `c/miner --gpu`. The CPU still builds every
+candidate block. The GPU only searches nonces, 16.7 million (2^24) per launch, with one work item per
+nonce (`c/src/search.cl`). Each launch reports the lowest nonce that meets the target, and the CPU
+rechecks it before submitting. This is the project's one dependency: you need an OpenCL driver for
+your GPU and the headers to build against. On Fedora, Mesa's rusticl driver covers AMD and Intel
+GPUs:
+
+```sh
+sudo dnf install mesa-libOpenCL clinfo opencl-headers OpenCL-ICD-Loader-devel
+export RUSTICL_ENABLE=radeonsi    # rusticl hides AMD GPUs without this (use iris for Intel)
+clinfo -l                         # should list your GPU
+make -C c GPU=1
+make -C c test GPU=1              # checks that the GPU finds the same nonces as the CPU
+c/miner --gpu --benchmark 5
+c/miner --gpu --blocks 101
+```
+
+Mesa may print a warning about libclc on every run. That is one reason the CPU rechecks the GPU's
+answers.
+
+On regtest the GPU gains nothing. A launch hashes all 16.7 million nonces even though one or two would
+do, so `attempts` reads 16777216 for each block. On mainnet, at a difficulty of 140 trillion, a solo
+GPU at 1 GH/s would take around 18 million years per block on average.
 
 ## Ideas for next steps
 
@@ -105,6 +133,8 @@ to the interpreter rather than to hashing.
 - Give the C miner an ARMv8 `sha256_compress` that uses the SHA-256 crypto extensions (`sha256h`,
   `sha256h2`, `sha256su0`, `sha256su1`), next to the x86 SHA-NI one in `c/src/sha256_shani.c`.
 - Add BIP320 version rolling as a second source of search space alongside the extranonce.
+- Speed up the GPU kernel: compute the nonce-independent first rounds once per launch, and skip the
+  second hash's last rounds when its top word already fails the target.
 
 ## License
 

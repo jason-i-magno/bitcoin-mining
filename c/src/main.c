@@ -8,6 +8,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "gpu.h"
 #include "mining.h"
 #include "rpc.h"
 #include "sha256.h"
@@ -21,6 +22,7 @@ static void usage(FILE *out) {
             "  -n, --blocks N         number of blocks to mine (default: 1)\n"
             "      --address ADDR     where to pay block rewards (default: a new address from the node's wallet)\n"
             "  -t, --threads N        hashing threads (default: one per CPU)\n"
+            "      --gpu              hash on the first OpenCL GPU instead (needs make GPU=1)\n"
             "      --rpc-url URL      default: http://127.0.0.1:18443\n"
             "      --datadir DIR      bitcoind datadir, used to find the RPC cookie (default: ./data)\n"
             "      --rpc-user USER    use username/password auth instead of the cookie\n"
@@ -44,7 +46,7 @@ static long parse_positive(const char *s, const char *flag) {
     return v;
 }
 
-static void benchmark(int threads, long seconds) {
+static void benchmark(int threads, gpu_device *gpu, long seconds) {
     /* An impossible all-zero target, so every nonce is hashed. */
     block_header header = {.version = 0x20000000, .bits = 0x207fffff};
     uint8_t target[32] = {0};
@@ -53,13 +55,24 @@ static void benchmark(int threads, long seconds) {
     uint64_t hashes = 0, nonce = 0;
     double elapsed;
     do {
-        search_result r = search(&header, target, nonce, nonce + (UINT64_C(1) << 24), threads);
+        uint64_t stop = nonce + (UINT64_C(1) << 24);
+        search_result r;
+        char err[512];
+        if (!gpu) {
+            r = search(&header, target, nonce, stop, threads);
+        } else if (!gpu_search(gpu, &header, target, nonce, stop, &r, err, sizeof(err))) {
+            die("%s", err);
+        }
         hashes += r.hashes;
         nonce = (nonce + (UINT64_C(1) << 24)) % NONCE_SPACE;
         clock_gettime(CLOCK_MONOTONIC, &t1);
         elapsed = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
     } while (elapsed < (double)seconds);
     double rate = (double)hashes / elapsed;
+    if (gpu) {
+        printf("GPU %s: %.2f MH/s\n", gpu_name(gpu), rate / 1e6);
+        return;
+    }
     printf("%d thread(s), %s SHA-256: %.2f MH/s (%.2f MH/s per thread)\n", threads, sha256_implementation(),
            rate / 1e6, rate / 1e6 / threads);
 }
@@ -107,8 +120,9 @@ int main(int argc, char **argv) {
     long blocks = 1, threads = sysconf(_SC_NPROCESSORS_ONLN), benchmark_seconds = 0;
     const char *address = NULL, *rpc_url = "http://127.0.0.1:18443", *datadir = "data";
     const char *rpc_user = NULL, *rpc_password = "";
+    bool use_gpu = false;
 
-    enum { OPT_ADDRESS = 256, OPT_RPC_URL, OPT_DATADIR, OPT_RPC_USER, OPT_RPC_PASSWORD, OPT_BENCHMARK };
+    enum { OPT_ADDRESS = 256, OPT_RPC_URL, OPT_DATADIR, OPT_RPC_USER, OPT_RPC_PASSWORD, OPT_BENCHMARK, OPT_GPU };
     static const struct option options[] = {
         {"blocks", required_argument, NULL, 'n'},
         {"threads", required_argument, NULL, 't'},
@@ -118,6 +132,7 @@ int main(int argc, char **argv) {
         {"rpc-user", required_argument, NULL, OPT_RPC_USER},
         {"rpc-password", required_argument, NULL, OPT_RPC_PASSWORD},
         {"benchmark", required_argument, NULL, OPT_BENCHMARK},
+        {"gpu", no_argument, NULL, OPT_GPU},
         {"help", no_argument, NULL, 'h'},
         {0},
     };
@@ -132,6 +147,7 @@ int main(int argc, char **argv) {
         case OPT_RPC_USER: rpc_user = optarg; break;
         case OPT_RPC_PASSWORD: rpc_password = optarg; break;
         case OPT_BENCHMARK: benchmark_seconds = parse_positive(optarg, "--benchmark"); break;
+        case OPT_GPU: use_gpu = true; break;
         case 'h': usage(stdout); return 0;
         default: usage(stderr); return 1;
         }
@@ -143,8 +159,17 @@ int main(int argc, char **argv) {
     if (threads < 1) {
         threads = 1;
     }
+    gpu_device *gpu = NULL;
+    if (use_gpu) {
+        char err[8192];
+        gpu = gpu_open(err, sizeof(err));
+        if (!gpu) {
+            die("%s", err);
+        }
+    }
     if (benchmark_seconds) {
-        benchmark((int)threads, benchmark_seconds);
+        benchmark((int)threads, gpu, benchmark_seconds);
+        gpu_close(gpu);
         return 0;
     }
 
@@ -165,8 +190,12 @@ int main(int argc, char **argv) {
     if (!chain) {
         die("cannot reach bitcoind (%s). Start it with: scripts/regtest.sh start", rpc.error);
     }
-    printf("Mining %ld block(s) on %s with %ld thread(s) and %s SHA-256, ", blocks, chain, threads,
-           sha256_implementation());
+    if (gpu) {
+        printf("Mining %ld block(s) on %s with GPU %s, ", blocks, chain, gpu_name(gpu));
+    } else {
+        printf("Mining %ld block(s) on %s with %ld thread(s) and %s SHA-256, ", blocks, chain, threads,
+               sha256_implementation());
+    }
     json_free(info);
 
     uint8_t script_pubkey[MAX_SCRIPT_PUBKEY];
@@ -175,7 +204,7 @@ int main(int argc, char **argv) {
     for (long i = 0; i < blocks; i++) {
         mined_block block;
         char err[512];
-        if (!mine_block(&rpc, script_pubkey, script_pubkey_len, (int)threads, &block, err, sizeof(err))) {
+        if (!mine_block(&rpc, script_pubkey, script_pubkey_len, (int)threads, gpu, &block, err, sizeof(err))) {
             die("%s", err);
         }
         printf("height %6u  %s  nonce=%u extranonce=%llu txs=%zu attempts=%llu (%.2fs)\n", block.height,
@@ -183,5 +212,6 @@ int main(int argc, char **argv) {
                (unsigned long long)block.attempts, block.seconds);
         fflush(stdout);
     }
+    gpu_close(gpu);
     return 0;
 }

@@ -16,6 +16,8 @@
 #define CHUNK_SIZE (UINT64_C(1) << 26) /* nonces to try between checks for a fresher template */
 #define TEMPLATE_MAX_AGE 30            /* seconds before asking the node for a new template */
 
+typedef struct gpu_device gpu_device; /* gpu.h */
+
 /* A complete block, except that its header nonce may not satisfy the target yet. */
 typedef struct {
     block_header header;
@@ -55,8 +57,9 @@ void candidate_free(candidate *c);
 search_result search(const block_header *header, const uint8_t target[32], uint64_t start, uint64_t stop,
                      int threads);
 
-/* Mine and submit one block on top of the node's current tip. */
+/* Mine and submit one block on top of the node's current tip, hashing on `gpu` if it
+   isn't NULL, otherwise on `threads` CPU threads. */
 bool mine_block(rpc_client *rpc, const uint8_t *script_pubkey, size_t script_pubkey_len, int threads,
-                mined_block *out, char *err, size_t err_len);
+                gpu_device *gpu, mined_block *out, char *err, size_t err_len);
 
 #endif

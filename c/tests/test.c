@@ -7,6 +7,7 @@
 
 #include "block.h"
 #include "encoding.h"
+#include "gpu.h"
 #include "json.h"
 #include "mining.h"
 #include "rpc.h"
@@ -385,23 +386,31 @@ static void test_build_candidate(void) {
     json_free(t);
 }
 
+/* The nonce in [lo, hi) with the smallest header hash, computed the slow way, and that
+   hash. As a target, it is met by that nonce alone. */
+static uint32_t smallest_hash(block_header h, uint64_t lo, uint64_t hi, uint8_t smallest[32]) {
+    uint8_t hash[32];
+    uint32_t smallest_nonce = 0;
+    for (uint64_t nonce = lo; nonce < hi; nonce++) {
+        h.nonce = (uint32_t)nonce;
+        header_hash(&h, hash);
+        if (nonce == lo || hash_meets_target(hash, smallest)) {
+            memcpy(smallest, hash, 32);
+            smallest_nonce = h.nonce;
+        }
+    }
+    return smallest_nonce;
+}
+
 /* The fast path (midstate, precomputed padding, early rejection) must agree with plain
-   sha256d. Set the target to the smallest hash among some nonces, computed the slow
-   way: search must then find exactly that nonce, which also exercises the full
-   comparison when the top 32 bits are equal. */
+   sha256d. With the target set to the smallest hash among some nonces, search must find
+   exactly that nonce, which also exercises the full comparison when the top 32 bits
+   are equal. */
 static void test_search_matches_reference(void) {
     block_header h = genesis_header();
     const uint32_t n = 5000;
-    uint8_t best[32], hash[32];
-    uint32_t best_nonce = 0;
-    for (uint32_t nonce = 0; nonce < n; nonce++) {
-        h.nonce = nonce;
-        header_hash(&h, hash);
-        if (nonce == 0 || hash_meets_target(hash, best)) {
-            memcpy(best, hash, 32);
-            best_nonce = nonce;
-        }
-    }
+    uint8_t best[32];
+    uint32_t best_nonce = smallest_hash(h, 0, n, best);
     for (int threads = 1; threads <= 4; threads++) {
         search_result r = search(&h, best, 0, n, threads);
         CHECK(r.found && r.nonce == best_nonce);
@@ -455,6 +464,60 @@ static void test_shani_matches_generic(void) {
 #endif
 }
 
+#ifdef HAVE_OPENCL
+static search_result run_gpu(gpu_device *gpu, const block_header *h, const uint8_t target[32], uint64_t lo,
+                             uint64_t hi) {
+    search_result r = {0};
+    char err[512] = "";
+    bool ok = gpu_search(gpu, h, target, lo, hi, &r, err, sizeof(err));
+    CHECK(ok);
+    if (!ok) {
+        fprintf(stderr, "  gpu_search: %s\n", err);
+    }
+    return r;
+}
+
+/* The GPU must find the same nonces as the CPU: the only one that meets the smallest
+   hash in a range as its target, and the first of several that meet an easier one.
+   Launches of 1000 nonces put answers in later launches and end mid-work-group, and a
+   range at the top of the nonce space checks nonces near 2^32. */
+static void test_gpu_search(void) {
+    char err[8192];
+    gpu_device *gpu = gpu_open(err, sizeof(err));
+    if (!gpu) {
+        printf("no usable GPU, so the GPU search was not tested: %s\n", err);
+        return;
+    }
+    block_header h = genesis_header();
+    const uint32_t n = 5000;
+    const uint64_t starts[] = {0, NONCE_SPACE - n};
+    const uint32_t batches[] = {GPU_BATCH, 1000};
+
+    /* About 1 hash in 1000 is below 2^32/1000 * 2^224, so 5000 nonces hold several. */
+    uint8_t easy[32], impossible[32] = {0};
+    memset(easy, 0xff, 28);
+    memcpy(easy + 28, (const uint8_t[]){0x37, 0x89, 0x41, 0x00}, 4);
+
+    for (int s = 0; s < 2; s++) {
+        uint64_t lo = starts[s], hi = lo + n;
+        uint8_t smallest[32];
+        uint32_t smallest_nonce = smallest_hash(h, lo, hi, smallest);
+        search_result first = search(&h, easy, lo, hi, 1);
+        CHECK(first.found);
+        for (int b = 0; b < 2; b++) {
+            gpu_set_batch(gpu, batches[b]);
+            search_result r = run_gpu(gpu, &h, smallest, lo, hi);
+            CHECK(r.found && r.nonce == smallest_nonce);
+            r = run_gpu(gpu, &h, easy, lo, hi);
+            CHECK(r.found && r.nonce == first.nonce);
+            r = run_gpu(gpu, &h, impossible, lo, hi);
+            CHECK(!r.found && r.hashes == n);
+        }
+    }
+    gpu_close(gpu);
+}
+#endif
+
 int main(void) {
     test_sha256();
     test_compact_size();
@@ -471,6 +534,9 @@ int main(void) {
     test_search_matches_reference();
     test_generic_compress();
     test_shani_matches_generic();
+#ifdef HAVE_OPENCL
+    test_gpu_search();
+#endif
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

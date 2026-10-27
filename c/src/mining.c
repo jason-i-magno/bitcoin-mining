@@ -9,6 +9,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "gpu.h"
 #include "sha256.h"
 
 static double now(void) {
@@ -203,18 +204,8 @@ static void *search_worker(void *arg) {
 
 search_result search(const block_header *header, const uint8_t target[32], uint64_t start, uint64_t stop,
                      int threads) {
-    uint8_t raw[HEADER_SIZE];
-    header_serialize(header, raw);
-
-    /* SHA-256 consumes 64-byte blocks, and the first 64 header bytes don't depend on
-       the nonce. Hash them once and resume from that "midstate" for every attempt. */
-    uint32_t midstate[8], words[16];
-    memcpy(midstate, SHA256_IV, sizeof(midstate));
-    for (int i = 0; i < 16; i++) {
-        words[i] = load_be32(raw + 4 * i);
-    }
-    sha256_compress(midstate, words);
-    uint32_t tail[3] = {load_be32(raw + 64), load_be32(raw + 68), load_be32(raw + 72)};
+    uint32_t midstate[8], tail[3];
+    header_midstate(header, midstate, tail);
 
     if (threads < 1) {
         threads = 1;
@@ -274,7 +265,7 @@ static json *fetch_template(rpc_client *rpc) {
 }
 
 bool mine_block(rpc_client *rpc, const uint8_t *script_pubkey, size_t script_pubkey_len, int threads,
-                mined_block *out, char *err, size_t err_len) {
+                gpu_device *gpu, mined_block *out, char *err, size_t err_len) {
     double started = now(), fetched_at = started;
     json *template = fetch_template(rpc);
     if (!template) {
@@ -304,7 +295,13 @@ bool mine_block(rpc_client *rpc, const uint8_t *script_pubkey, size_t script_pub
             break;
         }
         uint64_t stop = nonce_start + CHUNK_SIZE < NONCE_SPACE ? nonce_start + CHUNK_SIZE : NONCE_SPACE;
-        search_result r = search(&cand.header, cand.target, nonce_start, stop, threads);
+        search_result r;
+        if (!gpu) {
+            r = search(&cand.header, cand.target, nonce_start, stop, threads);
+        } else if (!gpu_search(gpu, &cand.header, cand.target, nonce_start, stop, &r, err, err_len)) {
+            candidate_free(&cand);
+            break;
+        }
         attempts += r.hashes;
 
         if (!r.found) {

@@ -29,6 +29,20 @@ void header_hash(const block_header *header, uint8_t hash[32]) {
     sha256d(raw, sizeof(raw), hash);
 }
 
+void header_midstate(const block_header *header, uint32_t midstate[8], uint32_t tail[3]) {
+    uint8_t raw[HEADER_SIZE];
+    header_serialize(header, raw);
+    uint32_t words[16];
+    for (int i = 0; i < 16; i++) {
+        words[i] = load_be32(raw + 4 * i);
+    }
+    memcpy(midstate, SHA256_IV, 8 * sizeof(uint32_t));
+    sha256_compress(midstate, words);
+    for (int i = 0; i < 3; i++) {
+        tail[i] = load_be32(raw + 64 + 4 * i);
+    }
+}
+
 void merkle_root(const uint8_t (*hashes)[32], size_t count, uint8_t root[32]) {
     /* One spare slot for duplicating the last hash of an odd level. */
     uint8_t(*level)[32] = malloc((count + 1) * 32);
